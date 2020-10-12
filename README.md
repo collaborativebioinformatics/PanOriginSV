@@ -23,6 +23,7 @@ Overview Diagram
 # How to use <this software>
 
 # Software Workflow Diagram
+![alt text](pipeline.png)
 
 # File structure diagram 
 #### _Define paths, variable names, etc_
