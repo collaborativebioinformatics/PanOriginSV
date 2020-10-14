@@ -32,7 +32,7 @@ We aim to host our package on conda. Until then, the requirements are listed bel
 
 # Running the tool
 
-Below is the syntax for running the tool
+Below is the syntax for running the tool. To get sample input data for the tool, please create an account for the [GEAC](https://www.drivendata.org/competitions/63/genetic-engineering-attribution/) competition and download the data).
 
 ```
 ./loopred -h
