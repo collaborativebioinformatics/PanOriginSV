@@ -2,27 +2,17 @@
 
 ## Please cite our work -- here is the ICMJE Standard Citation:
 
-### ...and a link to the DOI:
-
-## Awesome Logo
-
-### You can make a free DOI with zenodo <link>
-
-## Website (if applicable)
-
 ## Intro statement
+PanOriginSV performs lab-of-origin prediction in three distinct steps. First, during the training phase PanOriginSV clusters similar sequences using MMSEQ2. Then we use BCALM to construct pangenome graphs for each cluster and use minigraph to align to the input to their corresponding pangenome graphs. Using the alignment data, we train a random forest model to predict lab of origin.
 
 ## What's the problem?
+Given a set of genetically engineered sequences, can you predict their lab of origin?
 
 ## Why should we solve it?
+Determining lab of origin for input sequences has various use cases ranging from attributing the source of dangerous sequences to finding labs who work on similar sequences.
 
 # What is <this software>?
 
-Overview Diagram
-
-# How to use <this software>
-
-# Software Workflow Diagram
 ![alt text](pipeline.png)
 
 # File structure diagram 
@@ -30,48 +20,48 @@ Overview Diagram
 
 # Installation options:
 
-We provide two options for installing <this software>: Docker or directly from Github.
+We aim to host our package on conda. Until then, the requirements are listed below:
 
-### Docker
+* mmseqs2
+* bcalm
+* minigraph
+* biopython
+* scikit-learn
+* tqdm
 
-The Docker image contains <this software> as well as a webserver and FTP server in case you want to deploy the FTP server. It does also contain a web server for testing the <this software> main website (but should only be used for debug purposes).
 
-1. `docker pull ncbihackathons/<this software>` command to pull the image from the DockerHub
-2. `docker run ncbihackathons/<this software>` Run the docker image from the master shell script
-3. Edit the configuration files as below
+# Running the tool
 
-### Installing <this software> from Github
+Below is the syntax for running the tool. To get sample input data for the tool, please create an account for the [GEAC](https://www.drivendata.org/competitions/63/genetic-engineering-attribution/) competition and download the data).
 
-1. `git clone https://github.com/NCBI-Hackathons/<this software>.git`
-2. Edit the configuration files as below
-3. `sh server/<this software>.sh` to test
-4. Add cron job as required (to execute <this software>.sh script)
+```
+./loopred -h
+usage: loopred [-h] --labels LABELS [--metadata METADATA] [-t THREADS]
+               [-o OUTPUT_DIR] [-w WORK_DIR] [--version]
+               training-files testing-files
 
-### Configuration
+A tool for prediction lab of origin.
 
-```Examples here```
+positional arguments:
+  training-files        A file containing a newline separated list of training
+                        fasta files.
+  testing-files         A file containing a newline separated list of testing
+                        fasta files.
 
-# Testing
-
-We tested four different tools with <this software>. They can be found in [server/tools/](server/tools/) . 
-
-# Additional Functionality
-
-### DockerFile
-
-<this software> comes with a Dockerfile which can be used to build the Docker image.
-
-  1. `git clone https://github.com/NCBI-Hackathons/<this software>.git`
-  2. `cd server`
-  3. `docker build --rm -t <this software>/<this software> .`
-  4. `docker run -t -i <this software>/<this software>`
-  
-### Website
-
-There is also a Docker image for hosting the main website. This should only be used for debug purposes.
-
-  1. `git clone https://github.com/NCBI-Hackathons/<this software>.git`
-  2. `cd Website`
-  3. `docker build --rm -t <this software>/website .`
-  4. `docker run -t -i <this software>/website`
-  
+optional arguments:
+  -h, --help            show this help message and exit
+  --labels LABELS       A file containing two columns. The first is the
+                        sequence id and the second is the sequence label.
+                        (default: None)
+  --metadata METADATA   A tsv file containing metadata for the testing and
+                        training sequences. The first column must be the
+                        sequence id. (default: None)
+  -t THREADS, --threads THREADS
+                        Number of threads to use. (default: 1)
+  -o OUTPUT_DIR, --output-dir OUTPUT_DIR
+                        Location of intermediate files. (default: loopred_out)
+  -w WORK_DIR, --work-dir WORK_DIR
+                        Location of intermediate files. Defaults to random
+                        directory in /tmp (default: None)
+  --version             show program's version number and exit
+```
