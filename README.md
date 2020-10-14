@@ -1,4 +1,5 @@
 # PanOriginSV team
+![alt text](POSVLogo.png)
 
 ## Intro statement
 PanOriginSV performs lab-of-origin prediction in three distinct steps. First, during the training phase PanOriginSV clusters similar sequences using MMSEQ2. Then we use BCALM to construct pangenome graphs for each cluster and use minigraph to align to the input to their corresponding pangenome graphs. Using the alignment data, we train a random forest model to predict lab of origin.
