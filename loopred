@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+
+from collections import defaultdict, Counter
+import subprocess
+import argparse
+from tqdm.notebook import tqdm
+from pathlib import Path
+import sklearn
+import tempfile
+from scipy import sparse
+from sklearn import preprocessing
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, recall_score
+from sklearn.ensemble import RandomForestClassifier
+import time
+import shutil
+import json
+import os
+import csv
+import numpy as np
+from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
+
+
+def top_n_accuracy(preds, truths, n, clf=None):
+    best_n = np.argsort(preds, axis=1)[:,-n:]
+    successes = 0
+    if clf:
+        for i in range(len(truths)):
+          if truths[i] in [clf.classes_[idx] for idx in best_n[i,:]]:
+            successes += 1
+    else:
+        for i in range(len(truths)):
+          if truths[i] in best_n[i,:]:
+            successes += 1
+    return float(successes)/len(truths)
+
+def get_graph_X_y(json_obj, sequence_to_label, nodes_seen, labels):
+    y_str = []
+    data = []
+    seqs_seen = {obj["name"] for obj in json_obj}
+    cols = len(nodes_seen)
+    rows = len(seqs_seen)
+    row_ind = []
+    col_ind = []
+    x_le = preprocessing.LabelEncoder()
+    x_le.fit(list(nodes_seen))
+
+    seq_to_nodes_hit = defaultdict(list)
+    for obj in json_obj:
+        seq_to_nodes_hit[obj["name"]].extend(mapping["position"]["node_id"] for mapping in obj["path"]["mapping"] if "node_id" in mapping["position"] if mapping["position"]["node_id"] in nodes_seen)
+    for row_num, seq_id in enumerate(seq_to_nodes_hit):
+        columns = x_le.transform(seq_to_nodes_hit[seq_id])
+        row_ind.extend([row_num for _ in range(len(columns))])
+        col_ind.extend(columns)
+        data.extend(1 for _ in range(len(columns)))
+        y_str.append(sequence_to_label[seq_id])
+
+    X_fragged = sparse.csr_matrix((data, (row_ind, col_ind)), shape=(rows, cols))
+    y_le = preprocessing.LabelEncoder()
+    y_le.fit(list(labels))
+    y_fragged = y_le.transform(y_str)
+    return X_fragged, y_fragged
+
+def get_X_y_phawk(plasmid_file, sequence_to_label, frags, labels):
+    y_str = []
+    data = []
+    cols = len(frags)
+    row_ind = []
+    col_ind = []
+    x_le = preprocessing.LabelEncoder()
+    x_le.fit(list(frags))
+    # x_le.fit(list(frags_seen))
+    curr_id = ""
+    frags_hit = []
+    hit_percent = []
+    row_num = 0
+    with open(plasmid_file) as training_handle:
+        reader = csv.DictReader(training_handle, delimiter='\t')
+        for r, line in enumerate(reader):
+            curr_id = line["Query seq"]
+            break
+    with open(plasmid_file) as training_handle:
+        reader = csv.DictReader(training_handle, delimiter='\t')
+        for r, line in enumerate(reader):
+            seq_id = line["Query seq"]
+            if (seq_id) != curr_id:
+                if len(frags_hit) == 0:
+                    print(f"{curr_id} doesn't hit anything!")
+                columns = x_le.transform(frags_hit)
+                row_ind.extend([row_num for _ in range(len(columns))])
+                col_ind.extend(columns)
+                data.extend(1 for _ in range(len(frags_hit)))
+                y_str.append(sequence_to_label[curr_id])
+                frags_hit = []
+                hit_percent = []
+                curr_id = seq_id
+                row_num += 1
+            #if float(line["%IDY"]) > .95:
+            frags_hit.append(line["Frag seq"])
+            hit_percent.append(float(line["%IDY"]))
+        columns = x_le.transform(frags_hit)
+        # columns = x_le.transform(line[2:])
+        row_ind.extend([row_num for _ in range(len(columns))])
+        col_ind.extend(columns)
+        data.extend(1 for _ in range(len(frags_hit)))
+        y_str.append(sequence_to_label[curr_id])   
+    rows = row_num + 1
+    X_train_fragged = sparse.csr_matrix((data, (row_ind, col_ind)), shape=(rows, cols))
+    y_le = preprocessing.LabelEncoder()
+    y_le.fit(labels)
+    y_train_fragged = y_le.transform(y_str)
+    return X_train_fragged, y_train_fragged
+
+def train_test_split_phawk(train_list_file, test_list_file, seq_id_to_label, work_dir, threads):
+    work_dir = f"{work_dir}/phawk_run"
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+    labels = set(label for seq, label in seq_id_to_label.items())
+    with open(os.path.join(work_dir, "plaster.out"), 'w') as plaster_out, open(os.path.join(work_dir, "plaster.err"), 'w') as plaster_err:
+        subprocess.check_call("plaster {} --realign --output {} --work-dir {} -p {}".format(
+                train_list_file,
+                os.path.join(work_dir, "plaster_train_results"),
+                os.path.join(work_dir, "plaster_train_work"),
+                threads).split(' '),
+            stdout=plaster_out, stderr=plaster_err)
+    train_plasmid_file = os.path.join(work_dir, "plaster_train_results.tsv")
+    frags_seen = set()
+    with open(train_plasmid_file) as training_handle:
+        reader = csv.DictReader(training_handle, delimiter='\t')
+        for line in reader:
+            frags_seen.add(line["Frag seq"])
+    max_frag = int(max(frags_seen, key=lambda x: int(x.split("_")[1])).split("_")[1])
+    frags_seen = [f"frag_{idx}" for idx in range(max_frag + 1)]  
+    with open(os.path.join(work_dir, "plaster_test.out"), 'w') as plaster_out, open(os.path.join(work_dir, "plaster_test.err"), 'w') as plaster_err:
+        subprocess.check_call("plaster {} --output {} --work-dir {} -p {} --align-only --template {}".format(
+                test_list_file,
+                os.path.join(work_dir, "plaster_test_results"),
+                os.path.join(work_dir, "plaster_test_work"),
+                threads,
+                os.path.join(work_dir, "plaster_train_results.fasta")).split(' '),
+            stdout=plaster_out, stderr=plaster_err)
+    test_plasmid_file = os.path.join(work_dir, "plaster_test_results.tsv")
+    t1 = time.time()
+    X_train_fragged, y_train_fragged = get_X_y_phawk(train_plasmid_file, seq_id_to_label, frags_seen, list(labels))
+    X_test_fragged, y_test_fragged = get_X_y_phawk(test_plasmid_file, seq_id_to_label, frags_seen, list(labels))
+    return X_train_fragged, X_test_fragged, y_train_fragged, y_test_fragged
+
+
+def train_test_split(train_fasta, test_fasta, seq_id_to_label, work_dir, threads):
+    labels = set(label for seq, label in seq_id_to_label.items())
+    # Construct pangenome graph using training sequences
+    bcalm_work_dir = f"{work_dir}/bcalm"
+    Path(bcalm_work_dir).mkdir(parents=True, exist_ok=True)
+    command = f"bcalm -in {train_fasta} -abundance-min 1 -out {bcalm_work_dir}/training -nb-cores {threads}"
+    with open(f"{bcalm_work_dir}/bcalm.out", 'w') as bcalm_out, open(f"{bcalm_work_dir}/bcalm.err", 'w') as bcalm_err:
+        subprocess.check_call(command.split(' '), stdout=bcalm_out, stderr=bcalm_err)
+    command = f"convertToGFA.py {bcalm_work_dir}/training.unitigs.fa {bcalm_work_dir}/training.gfa 31"
+    with open(f"{bcalm_work_dir}/convert.out", 'w') as bcalm_out, open(f"{bcalm_work_dir}/convert.err", 'w') as bcalm_err:
+        subprocess.check_call(command.split(' '), stdout=bcalm_out, stderr=bcalm_err)
+
+    def align(input_fasta, output_name):
+        # Align sequences to pangenome graph
+        command = f"GraphAligner -g {bcalm_work_dir}/training.gfa -f {input_fasta} -a {ga_work_dir}/{output_name}.gam -t {threads} -x dbg"
+        with open(f"{ga_work_dir}/galigner_{output_name}.out", 'w') as galigner_out, open(f"{ga_work_dir}/galigner_{output_name}.err", 'w') as galigner_err:
+            subprocess.check_call(command.split(' '), stdout=galigner_out, stderr=galigner_err)
+        # Convert .gam to .json
+        with open(f"{work_dir}/{output_name}_alignment.json", 'w') as output_json:
+            command = f"vg view -a {ga_work_dir}/{output_name}.gam --threads {threads}"
+            subprocess.check_call(command.split(' '), stdout=output_json)
+    ga_work_dir = f"{work_dir}/graph_aligner"
+    Path(ga_work_dir).mkdir(parents=True, exist_ok=True)
+    align(train_fasta, "train")
+    align(test_fasta, "test")
+
+    # Parse Output
+    train_json_obj = []
+    with open(f"{work_dir}/train_alignment.json") as input_json:
+        for line in input_json:
+            train_json_obj.append(json.loads(line))
+    test_json_obj = []
+    with open(f"{work_dir}/test_alignment.json") as input_json:
+        for line in input_json:
+            test_json_obj.append(json.loads(line))
+            
+    nodes_seen = set()
+    for obj in train_json_obj:
+        for mapping in obj["path"]["mapping"]:
+            if "node_id" not in mapping["position"]:
+                continue
+            nodes_seen.add(mapping["position"]["node_id"])
+    X_train_fragged, y_train_fragged = get_graph_X_y(train_json_obj, seq_id_to_label, nodes_seen, labels)
+    X_test_fragged, y_test_fragged = get_graph_X_y(test_json_obj, seq_id_to_label, nodes_seen, labels)
+    return X_train_fragged, X_test_fragged, y_train_fragged, y_test_fragged
+
+def get_top_n_mash_seq_ids(query_file, rep_list_file, work_dir, threads, n=10):
+    command = f"mash dist {query_file} {rep_list_file} -l -k 16 -t -p {threads}"
+    with open(f"{work_dir}/mash.out", 'w') as mash_out, open(f"{work_dir}/mash.err", 'w') as mash_err:
+        subprocess.check_call(command.split(' '), stdout=mash_out, stderr=mash_err)
+    filename_to_sim = {}
+    with open(f"{work_dir}/mash.out") as mash_results:
+        mash_reader = csv.DictReader(mash_results, delimiter='\t', fieldnames=["reference", "sim"])
+        next(mash_reader)
+        for line in mash_reader:
+            filename_to_sim[line["reference"]] = float(line["sim"])
+    ret = [Path(f).stem for f in dict(sorted(filename_to_sim.items(), key=lambda x: x[1])).keys()][:n]
+    return ret
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='A tool for prediction lab of origin.',
+        prog="loopred",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("training_files", metavar="training-files", type=str, 
+        help="A file containing a newline separated list of training fasta files.")
+    parser.add_argument("testing_files", metavar="testing-files", type=str, 
+        help="A file containing a newline separated list of testing fasta files.")
+    parser.add_argument("--labels", type=str, required=True,
+        help="A file containing two columns. The first is the sequence id and the second is the sequence label.")
+    parser.add_argument("--metadata", type=str,
+        help="A tsv file containing metadata for the testing and training sequences. The first column must be the sequence id.")
+    parser.add_argument("-t", "--threads", type=int, default=1, 
+        help="Number of threads to use.")
+    parser.add_argument("-o", "--output-dir", type=str, default="loopred_out",
+        help="Location of intermediate files.")
+    parser.add_argument("-w", "--work-dir", type=str,
+        help="Location of intermediate files. Defaults to random directory in /tmp")
+    parser.add_argument('--version', action='version', version='%(prog)s 0.0.0')
+
+    args = parser.parse_args()
+    threads = args.threads
+
+    # Set up directories
+    if args.work_dir:
+        work_dir = args.work_dir
+        cleanup_work = False
+        Path(work_dir).mkdir(parents=True, exist_ok=True)
+    else:
+        work_dir = tempfile.mkdtemp()
+        cleanup_work = True
+
+    output_dir = args.output_dir
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Get sequence labels
+    with open(args.labels) as labels_file:
+        seq_id_to_label = {line[0] : line[1] for line in csv.reader(labels_file, delimiter='\t')}
+
+    # Create combine fasta file in work dir for training and testing sequences
+    testing_fasta_file = f"{work_dir}/training_seqs.fasta"
+    training_fasta_file = f"{work_dir}/testing_seqs.fasta"
+    combined_fasta_file = f"{work_dir}/combined_seqs.fasta"
+    with open(args.training_files) as fasta_filenames, open(training_fasta_file, 'w') as fasta_out:
+        fasta_out.writelines(open(f.strip()).read() for f in fasta_filenames.readlines())
+    with open(args.testing_files) as fasta_filenames, open(testing_fasta_file, 'w') as fasta_out:
+        fasta_out.writelines(open(f.strip()).read() for f in fasta_filenames.readlines())
+    with open(training_fasta_file) as train_fasta, open(testing_fasta_file) as test_fasta, open(combined_fasta_file, 'w') as comb_fasta_file:
+        comb_fasta_file.write(train_fasta.read())
+        comb_fasta_file.write(test_fasta.read())
+    training_seq_records = {record.id : record for record in SeqIO.parse(training_fasta_file, "fasta")}
+    testing_seq_records = {record.id : record for record in SeqIO.parse(testing_fasta_file, "fasta")}
+
+
+    # Cluster input sequences
+    command = f"mmseqs easy-cluster {combined_fasta_file} {work_dir}/clusterRes {work_dir}/mmseqs_tmp --min-seq-id 0.5 -c 0.8 --cov-mode 1 -s 7.0"
+    # with open(f"{work_dir}/mmseqs.out", 'w') as mmseqs_out, open(f"{work_dir}/mmseqs.err", 'w') as mmseqs_err:
+        # subprocess.check_call(command.split(' '), stdout=mmseqs_out, stderr=mmseqs_err)
+
+    rep_dict = defaultdict(list)
+    with open(f"{work_dir}/clusterRes_cluster.tsv") as clusters:
+        for rep, member in (line.rstrip().split('\t') for line in clusters):
+            rep_dict[rep].append(member)
+    sorted_cluster_reps = list(x[0] for x in sorted(rep_dict.items(), reverse=True, key=lambda x: len(x[1])))
+
+    # Map test sequence to possible clusters
+    # ani_work_dir = f"{work_dir}/ani_work"
+    # Path(ani_work_dir).mkdir(parents=True, exist_ok=True)
+    # rep_list_file = f"{ani_work_dir}/rep_list_file"
+    # rep_list_file = f"{work_dir}/cluster_filenames.txt"
+    # for idx, seq_id in enumerate(testing_seq_records.keys()):
+        # query_file = f"{ani_work_dir}/tmp.fasta"
+        # SeqIO.write(testing_seq_records[seq_id], query_file, "fasta")
+        # top_n_reps = get_top_n_mash_seq_ids(query_file, rep_list_file, ani_work_dir, threads, n=10)
+        # all_labels = set()
+        # for rep in top_n_reps:
+            # all_labels.update(set(seq_id_to_label[seq_id] for seq_id in rep_dict[rep]))
+        # if seq_id_to_label[seq_id] not in all_labels:
+            # print(f"ERROR:\t{idx}-{seq_id} has label {seq_id_to_label[seq_id]} which is not in any cluster!")
+
+
+    # Run prediction on each cluster
+    # for i in range(len(sorted_cluster_reps) // 100):
+    total_seqs_classified = 0
+    top_10_acc_sum = 0
+    # seq_ids = set()
+    for rep in sorted_cluster_reps[0:200]:
+        # seq_ids.update(rep_dict[rep])
+        # for rep in sorted_cluster_reps[:100]:
+        with open(combined_fasta_file) as t:
+            print(rep)
+            cluster_work_dir = f"{work_dir}/{rep}"
+            Path(cluster_work_dir).mkdir(parents=True, exist_ok=True)
+            seq_ids = rep_dict[rep]
+            cluster_train_seq_ids = [seq_id for seq_id in seq_ids if seq_id in training_seq_records]
+            cluster_train_labels = {seq_id_to_label[seq_id] for seq_id in cluster_train_seq_ids}
+            cluster_test_seq_ids = [seq_id for seq_id in seq_ids if seq_id in testing_seq_records]
+            not_present = 0
+            cluster_test_seq_ids_wrep = []
+            for seq_id in cluster_test_seq_ids:
+                if seq_id_to_label[seq_id] not in cluster_train_labels:
+                    not_present += 1
+                    # print(f"ERROR:\t{seq_id} has label {seq_id_to_label[seq_id]} which is not in the cluster!")
+                else:
+                    cluster_test_seq_ids_wrep.append(seq_id)
+            if not_present:
+                print(f"ERROR:\tCluster has {not_present} test sequences with no representation in training set")
+            cluster_test_seq_ids = cluster_test_seq_ids_wrep
+            cluster_train_fasta = f"{cluster_work_dir}/training.fasta"
+            cluster_test_fasta = f"{cluster_work_dir}/testing.fasta"
+            cluster_train_list_fasta = f"{cluster_work_dir}/training.txt"
+            cluster_test_list_fasta = f"{cluster_work_dir}/testing.txt"
+            with open(cluster_train_list_fasta, 'w') as ctlf:
+                for seq in cluster_train_seq_ids:
+                    ctlf.write(f"data/all_training_files/{seq}.fasta\n")
+            with open(cluster_test_list_fasta, 'w') as ctlf:
+                for seq in cluster_test_seq_ids:
+                    ctlf.write(f"data/all_training_files/{seq}.fasta\n")
+            if len(cluster_test_seq_ids) == 0:
+                print(f"No testing sequences in cluster {rep}")
+            print(f"{len(cluster_train_seq_ids)} training sequences and {len(cluster_test_seq_ids)} testing sequences")
+            SeqIO.write((training_seq_records[seq_id] for seq_id in cluster_train_seq_ids), cluster_train_fasta, "fasta")
+            SeqIO.write((testing_seq_records[seq_id] for seq_id in cluster_test_seq_ids), cluster_test_fasta, "fasta")
+
+            total_seqs_classified += len(cluster_test_seq_ids)
+            t0 = time.time()
+            X_train_fragged, X_test_fragged, y_train_fragged, y_test_fragged = train_test_split(
+                cluster_train_fasta, 
+                cluster_test_fasta, 
+                seq_id_to_label,
+                cluster_work_dir, 
+                threads)
+            t1 = time.time()
+            clf = RandomForestClassifier(n_estimators=200, n_jobs=80, max_depth=80)
+            clf.fit(X_train_fragged, y_train_fragged)
+            y_pred = clf.predict(X_train_fragged)
+            print("Top 1 train accuracy", accuracy_score(y_train_fragged, y_pred))
+            y_pred = clf.predict(X_test_fragged)
+            top_1_acc = accuracy_score(y_test_fragged, y_pred)
+            print("Top 1 test accuracy", top_1_acc)
+            y_pred = clf.predict_proba(X_test_fragged)
+            print("Top 5 test accuracy", top_n_accuracy(y_pred, y_test_fragged, 5, clf))
+            top_10_acc = top_n_accuracy(y_pred, y_test_fragged, 10, clf)
+            top_10_acc_sum += top_10_acc * len(y_pred)
+            total_seqs_classified += len(y_pred)
+            print("Top 10 test accuracy", top_10_acc)
+            t2 = time.time()
+            # print("Graph method machine learning took", t2 - t1, "seconds.\n")  
+
+    print(top_10_acc_sum / total_seqs_classified)
+    print(total_seqs_classified)
+
+    if cleanup_work:
+        shutil.rmtree(work_dir)
+
+
+
+
+
+main()
