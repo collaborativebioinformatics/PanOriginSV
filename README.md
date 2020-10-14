@@ -1,6 +1,4 @@
-# PanOriginSV
-
-## Please cite our work -- here is the ICMJE Standard Citation:
+# PanOriginSV team
 
 ## Intro statement
 PanOriginSV performs lab-of-origin prediction in three distinct steps. First, during the training phase PanOriginSV clusters similar sequences using MMSEQ2. Then we use BCALM to construct pangenome graphs for each cluster and use minigraph to align to the input to their corresponding pangenome graphs. Using the alignment data, we train a random forest model to predict lab of origin.
@@ -11,12 +9,10 @@ Given a set of genetically engineered sequences, can you predict their lab of or
 ## Why should we solve it?
 Determining lab of origin for input sequences has various use cases ranging from attributing the source of dangerous sequences to finding labs who work on similar sequences.
 
-# What is <this software>?
+# What loopred?
 
 ![alt text](pipeline.png)
 
-# File structure diagram 
-#### _Define paths, variable names, etc_
 
 # Installation options:
 
